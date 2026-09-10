@@ -8,6 +8,7 @@
 #   ./patches/apply.sh 2026-09-09-vuln1234.patch   # run just one file
 #   ./patches/apply.sh --dry-run             # show what would be applied/run, without changing anything
 #   ./patches/apply.sh -v                    # show full output even when running the whole directory
+#   ./patches/apply.sh --self-update         # redownload this script from GitHub and overwrite it
 #
 # Patches are applied with `patch -p1`, run from the parent directory of
 # this script (i.e. the project root), so they should be generated as
@@ -22,15 +23,38 @@ cd "$PROJECT_ROOT"
 
 DRY_RUN=false
 FORCE_VERBOSE=false
+SELF_UPDATE=false
 args=()
 for arg in "$@"; do
     case "$arg" in
-        --dry-run) DRY_RUN=true ;;
-        -v)        FORCE_VERBOSE=true ;;
-        *)         args+=("$arg") ;;
+        --dry-run)     DRY_RUN=true ;;
+        -v)            FORCE_VERBOSE=true ;;
+        --self-update) SELF_UPDATE=true ;;
+        *)             args+=("$arg") ;;
     esac
 done
 set -- "${args[@]+"${args[@]}"}"
+
+if [ "$SELF_UPDATE" = true ]; then
+    SELF_UPDATE_URL="https://raw.githubusercontent.com/bentideswell/magento2-patch-apply/main/apply.sh"
+    SELF_PATH="${BASH_SOURCE[0]}"
+    echo "==> Downloading latest apply.sh from $SELF_UPDATE_URL"
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    if ! curl -fsSL "$SELF_UPDATE_URL" -o "$tmp_file"; then
+        echo "ERROR: failed to download update" >&2
+        exit 1
+    fi
+    if [ ! -s "$tmp_file" ] || ! head -n1 "$tmp_file" | grep -q '^#!'; then
+        echo "ERROR: downloaded file does not look like a valid script" >&2
+        exit 1
+    fi
+    chmod +x "$tmp_file"
+    mv "$tmp_file" "$SELF_PATH"
+    trap - EXIT
+    echo "==> Updated $SELF_PATH"
+    exit 0
+fi
 
 VERBOSE=false
 if [ "$#" -gt 0 ] || [ "$FORCE_VERBOSE" = true ]; then
