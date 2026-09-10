@@ -39,10 +39,36 @@ fi
 
 RESULT_NAMES=()
 RESULT_STATUSES=()
+RESULT_NOTES=()
 
 record_result() {
     RESULT_NAMES+=("$1")
     RESULT_STATUSES+=("$2")
+    RESULT_NOTES+=("${3:-}")
+}
+
+# Splits `patch` output into per-file segments (each starts at a "patching
+# file" or "No file to patch" line) and classifies every segment as applied,
+# already-applied, failed, or skipped (target file missing). Prints the four
+# counts as "applied already failed skipped".
+classify_patch_output() {
+    awk '
+        { line = tolower($0) }
+        line ~ /^(patching|checking) file / { seg++; type[seg] = "ok" }
+        line ~ /^no file to patch/ { seg++; type[seg] = "skip" }
+        line ~ /hunks? failed/ { if (seg > 0) type[seg] = "fail" }
+        line ~ /previously applied/ { if (seg > 0 && type[seg] != "fail") type[seg] = "already" }
+        END {
+            a = 0; al = 0; f = 0; s = 0
+            for (i = 1; i <= seg; i++) {
+                if (type[i] == "skip") s++
+                else if (type[i] == "fail") f++
+                else if (type[i] == "already") al++
+                else a++
+            }
+            printf "%d %d %d %d\n", a, al, f, s
+        }
+    '
 }
 
 apply_patch() {
@@ -59,27 +85,44 @@ apply_patch() {
     fi
 
     local output
-    if output=$(patch "${patch_args[@]}" < "$file" 2>&1); then
-        if [ "$VERBOSE" = true ]; then
-            echo "$output"
-            echo ""
-        fi
-        record_result "$(basename "$file")" "Applied"
-    elif grep -qi "previously applied" <<< "$output" && ! grep -qi "failed" <<< "$output"; then
-        if [ "$VERBOSE" = true ]; then
-            echo "$output"
-            echo ""
-            echo "==> Already applied, skipping: $(basename "$file")"
-        fi
-        record_result "$(basename "$file")" "Already applied"
+    output=$(patch "${patch_args[@]}" < "$file" 2>&1) || true
+
+    local n_applied n_already n_failed n_skipped
+    read -r n_applied n_already n_failed n_skipped < <(classify_patch_output <<< "$output")
+
+    local status
+    if [ "$n_failed" -gt 0 ]; then
+        status="FAILED"
+    elif [ "$n_applied" -gt 0 ]; then
+        status="Applied"
+    elif [ "$n_already" -gt 0 ]; then
+        status="Already applied"
     else
-        if [ "$VERBOSE" = true ]; then
+        # No file in the patch could be found at all.
+        status="FAILED"
+    fi
+
+    local note=""
+    if [ "$n_skipped" -gt 0 ]; then
+        note="$n_skipped file"
+        if [ "$n_skipped" -gt 1 ]; then
+            note="${note}s"
+        fi
+        note="${note} skipped"
+    fi
+
+    if [ "$VERBOSE" = true ]; then
+        if [ "$status" = "FAILED" ]; then
             echo "$output" >&2
             echo ""
             echo "ERROR: failed to apply patch: $(basename "$file")" >&2
+        else
+            echo "$output"
+            echo ""
         fi
-        record_result "$(basename "$file")" "FAILED"
     fi
+
+    record_result "$(basename "$file")" "$status" "$note"
     if [ "$VERBOSE" = true ]; then
         echo ""
     fi
@@ -135,12 +178,17 @@ print_summary_and_exit() {
     if [ -t 1 ]; then
         reset=$'\033[0m'
     fi
+    local display
     for i in "${!RESULT_NAMES[@]}"; do
         color=""
         if [ -t 1 ]; then
             color="$(color_for_status "${RESULT_STATUSES[$i]}")"
         fi
-        printf "    %-55s %s%s%s\n" "${RESULT_NAMES[$i]}" "$color" "${RESULT_STATUSES[$i]}" "$reset"
+        display="${RESULT_STATUSES[$i]}"
+        if [ -n "${RESULT_NOTES[$i]}" ]; then
+            display="${display} - ${RESULT_NOTES[$i]}"
+        fi
+        printf "    %-55s %s%s%s\n" "${RESULT_NAMES[$i]}" "$color" "$display" "$reset"
         if [ "${RESULT_STATUSES[$i]}" = "FAILED" ]; then
             failed=true
         fi
