@@ -108,6 +108,18 @@ apply_patch() {
         echo ""
     fi
 
+    # If the whole patch reverses cleanly it is already fully applied. This
+    # catches patches whose hunks only add lines and still match their own
+    # context after being applied, which `--forward` alone would apply twice.
+    if patch -p1 -R --dry-run --batch --force < "$file" > /dev/null 2>&1; then
+        if [ "$VERBOSE" = true ]; then
+            echo "Patch already applied (reverses cleanly)"
+            echo ""
+        fi
+        record_result "$(basename "$file")" "Already applied"
+        return
+    fi
+
     local output
     output=$(patch "${patch_args[@]}" < "$file" 2>&1) || true
 
@@ -170,9 +182,12 @@ run_script() {
             record_result "$(basename "$file")" "FAILED"
         fi
     else
-        if bash "$file" > /dev/null 2>&1; then
+        local output
+        if output=$(bash "$file" 2>&1); then
             record_result "$(basename "$file")" "Applied"
         else
+            echo "$output" >&2
+            echo "ERROR: script exited with a non-zero status: $(basename "$file")" >&2
             record_result "$(basename "$file")" "FAILED"
         fi
     fi
@@ -251,7 +266,7 @@ if [ "${#files[@]}" -eq 0 ]; then
     exit 0
 fi
 
-IFS=$'\n' sorted=($(printf '%s\n' "${files[@]}" | sort))
+IFS=$'\n' sorted=($(printf '%s\n' "${files[@]}" | LC_ALL=C sort))
 unset IFS
 
 for file in "${sorted[@]}"; do
