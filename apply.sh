@@ -95,6 +95,47 @@ classify_patch_output() {
     '
 }
 
+# Prints the project-relative paths (after -p1 stripping) touched by a patch.
+patch_files() {
+    awk '
+        /^\+\+\+ / { f = $2 }
+        /^--- /       { o = $2 }
+        /^\+\+\+ /   { if (f == "/dev/null") f = o; sub(/^[^\/]*\//, "", f); print f }
+    ' "$1"
+}
+
+# True if any patch sorted after $1 also touches the project-relative path $2.
+superseded_by_later_patch() {
+    local current="$1" path="$2" seen=false f
+    for f in "${ALL_PATCHES[@]}"; do
+        if [ "$f" = "$current" ]; then
+            seen=true
+            continue
+        fi
+        if [ "$seen" = true ] && patch_files "$f" | grep -qxF -- "$path"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Splits a patch into one file per changed file: $2/chunk_0001.patch, ...
+split_patch() {
+    awk -v dir="$2" '
+        BEGIN { mode = "nodiff" }
+        NR == FNR { if ($0 ~ /^diff /) mode = "diff"; next }
+        {
+            start = (mode == "diff") ? ($0 ~ /^diff /) : ($0 ~ /^--- /)
+            if (start) {
+                if (out != "") close(out)
+                n++
+                out = sprintf("%s/chunk_%04d.patch", dir, n)
+            }
+            if (out != "") print > out
+        }
+    ' "$1" "$1"
+}
+
 apply_patch() {
     local file="$1"
     local patch_args=(-p1 --forward --batch)
@@ -120,11 +161,40 @@ apply_patch() {
         return
     fi
 
-    local output
-    output=$(patch "${patch_args[@]}" < "$file" 2>&1) || true
+    # The whole patch does not reverse. Check each file on its own so a file
+    # that a later patch has changed again does not make this patch fail.
+    # Chunks that are already applied (or superseded) are dropped; the rest
+    # are applied as a filtered patch.
+    local tmp_dir chunk chunk_path n_pre_already=0 n_chunks=0
+    tmp_dir="$(mktemp -d)"
+    split_patch "$file" "$tmp_dir"
+    : > "$tmp_dir/filtered.patch"
+    for chunk in "$tmp_dir"/chunk_*.patch; do
+        [ -e "$chunk" ] || continue
+        n_chunks=$((n_chunks + 1))
+        chunk_path="$(patch_files "$chunk" | head -n1)"
+        if patch -p1 -R --dry-run --batch --force < "$chunk" > /dev/null 2>&1; then
+            n_pre_already=$((n_pre_already + 1))
+        elif superseded_by_later_patch "$file" "$chunk_path" \
+            && ! patch -p1 --forward --batch --dry-run < "$chunk" > /dev/null 2>&1; then
+            n_pre_already=$((n_pre_already + 1))
+            if [ "$VERBOSE" = true ]; then
+                echo "Superseded by a later patch, treating as applied: $chunk_path"
+            fi
+        else
+            cat "$chunk" >> "$tmp_dir/filtered.patch"
+        fi
+    done
+
+    local output=""
+    if [ -s "$tmp_dir/filtered.patch" ]; then
+        output=$(patch "${patch_args[@]}" < "$tmp_dir/filtered.patch" 2>&1) || true
+    fi
+    rm -rf "$tmp_dir"
 
     local n_applied n_already n_failed n_skipped
     read -r n_applied n_already n_failed n_skipped < <(classify_patch_output <<< "$output")
+    n_already=$((n_already + n_pre_already))
 
     local status
     if [ "$n_failed" -gt 0 ]; then
@@ -237,6 +307,18 @@ print_summary_and_exit() {
     fi
     exit 0
 }
+
+# Every patch in apply order, used to detect files a later patch changes again.
+ALL_PATCHES=()
+shopt -s nullglob
+for f in "$SCRIPT_DIR"/*.patch; do
+    ALL_PATCHES+=("$f")
+done
+shopt -u nullglob
+if [ "${#ALL_PATCHES[@]}" -gt 0 ]; then
+    IFS=$'\n' ALL_PATCHES=($(printf '%s\n' "${ALL_PATCHES[@]}" | LC_ALL=C sort))
+    unset IFS
+fi
 
 if [ "$#" -gt 0 ]; then
     for arg in "$@"; do

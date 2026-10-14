@@ -1,3 +1,4 @@
-*.patch
-*.sh
+*
+
+!.gitignore
 !apply.sh
